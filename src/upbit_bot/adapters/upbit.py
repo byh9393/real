@@ -33,6 +33,7 @@ class Ticker(BaseModel):
     trade_price: float
     signed_change_rate: float
     acc_trade_price_24h: float
+    acc_trade_volume_24h: float | None = None
 
 
 class Candle(BaseModel):
@@ -43,6 +44,8 @@ class Candle(BaseModel):
     low_price: float
     trade_price: float
     timestamp: int
+    candle_acc_trade_price: float | None = None
+    candle_acc_trade_volume: float | None = None
 
 
 def _sign_payload(query: dict[str, Any], secret_key: str, access_key: str) -> str:
@@ -88,9 +91,14 @@ class UpbitClient:
         _ensure_ok(res)
         return [Ticker(**item) for item in res.json()]
 
-    async def candles(self, market: str, unit: int = 1, count: int = 200) -> list[Candle]:
+    async def minute_candles(self, market: str, unit: int = 1, count: int = 200) -> list[Candle]:
         endpoint = f"/v1/candles/minutes/{unit}"
         res = await self._client.get(endpoint, params={"market": market, "count": count})
+        _ensure_ok(res)
+        return [Candle(**item) for item in res.json()]
+
+    async def day_candles(self, market: str, count: int = 60) -> list[Candle]:
+        res = await self._client.get("/v1/candles/days", params={"market": market, "count": count})
         _ensure_ok(res)
         return [Candle(**item) for item in res.json()]
 

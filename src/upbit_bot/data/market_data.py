@@ -8,7 +8,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from upbit_bot.adapters.upbit import UpbitClient, Candle
+from upbit_bot.adapters.upbit import Candle, UpbitClient
 from upbit_bot.config import get_settings
 
 
@@ -37,7 +37,7 @@ class CandleCache:
         return self.base_dir / f"{market}_m{unit}.parquet"
 
     async def refresh(self, market: str, unit: int = 1, count: int = 200) -> pd.DataFrame:
-        candles = await self.client.candles(market, unit=unit, count=count)
+        candles = await self.client.minute_candles(market, unit=unit, count=count)
         frame = _candles_to_df(candles)
         frame.to_parquet(self._path(market, unit), index=False)
         return frame
@@ -47,6 +47,51 @@ class CandleCache:
         if not path.exists():
             raise FileNotFoundError(f"캐시가 없습니다: {path}")
         return pd.read_parquet(path)
+
+
+class UniverseFilter:
+    """유동성·건전성 기준으로 마켓 유니버스를 필터링한다."""
+
+    def __init__(self, client: UpbitClient | None = None, min_krw_amount: float = 3e8):
+        self.client = client or UpbitClient()
+        self.min_krw_amount = min_krw_amount
+
+    async def filter_by_liquidity(self, markets: list[str], top_n: int = 40) -> list[str]:
+        """최근 30일 평균 거래대금으로 상위 마켓을 선택한다."""
+
+        async def fetch_daily(market: str):
+            candles = await self.client.day_candles(market, count=30)
+            return market, candles
+
+        tasks = [fetch_daily(m) for m in markets]
+        results = await asyncio.gather(*tasks)
+
+        qualified: list[tuple[str, float]] = []
+        for market, candles in results:
+            if not candles:
+                continue
+            avg_amount = sum(c.candle_acc_trade_price or 0 for c in candles) / len(candles)
+            if avg_amount >= self.min_krw_amount:
+                qualified.append((market, avg_amount))
+
+        qualified.sort(key=lambda x: x[1], reverse=True)
+        return [m for m, _ in qualified[:top_n]]
+
+
+class MarketDataService:
+    """멀티 타임프레임 캔들을 수집하고 가공한다."""
+
+    def __init__(self, client: UpbitClient | None = None):
+        self.client = client or UpbitClient()
+
+    async def fetch_recent(self, market: str, unit: int = 5, count: int = 200) -> pd.DataFrame:
+        candles = await self.client.minute_candles(market, unit=unit, count=count)
+        return _candles_to_df(candles)
+
+    async def fetch_multi(self, markets: Iterable[str], unit: int = 5, count: int = 200) -> dict[str, pd.DataFrame]:
+        tasks = [self.fetch_recent(market, unit=unit, count=count) for market in markets]
+        results = await asyncio.gather(*tasks)
+        return {market: frame for market, frame in zip(markets, results)}
 
 
 def _candles_to_df(candles: list[Candle]) -> pd.DataFrame:
@@ -59,6 +104,8 @@ def _candles_to_df(candles: list[Candle]) -> pd.DataFrame:
                 "high": c.high_price,
                 "low": c.low_price,
                 "close": c.trade_price,
+                "turnover": c.candle_acc_trade_price,
+                "volume": c.candle_acc_trade_volume,
             }
             for c in candles
         ]
